@@ -1,242 +1,166 @@
 # main.py
 #
-# Astro Pi Mission Space Lab – ISS speed experiment (FINAL VERSION)
-#
-# FIXED: result.txt format - exactly one number, ≤5 sig figs, no extra text/newlines
+# Astro Pi Mission Space Lab – ISS speed experiment
+# Goal: Estimate ISS speed by:
+# 1. Taking up to 42 images of Earth in <10 minutes
+# 2. Using OpenCV to match features between consecutive images
+# 3. Estimating ground distance from pixel shifts + altitude
+# 4. Computing speed = distance/time, median removes outliers
 
 from time import time, sleep
 from pathlib import Path
-import csv
 import math
-
+import cv2
+import numpy as np
 from picamera import PiCamera
 from sense_hat import SenseHat
 
-import cv2
-import numpy as np
-
-
-# -----------------------------------------------------------------------------
-# CONFIGURATION CONSTANTS
-# -----------------------------------------------------------------------------
-
+# CONFIGURATION
 MAX_RUNTIME_SECONDS = 595
 MAX_IMAGES_TARGET = 42
 IMAGE_INTERVAL_SECONDS = 8
-
 CAMERA_RESOLUTION = (1280, 960)
 CAMERA_FOV_DEGREES = 62.0
-FIXED_ALTITUDE_M = 408_000.0
+FIXED_ALTITUDE_M = 408000.0  # Typical ISS altitude
 
-BASE_DIR = Path(".")
-DATA_DIR = BASE_DIR / "data"
-IMAGES_DIR = DATA_DIR / "images"
-RESULT_TXT = BASE_DIR / "result.txt"
-RESULTS_CSV = DATA_DIR / "results.csv"
+# Paths
+Path("data/images").mkdir(parents=True, exist_ok=True)
 
-DATA_DIR.mkdir(exist_ok=True)
-IMAGES_DIR.mkdir(exist_ok=True)
-
-
-# -----------------------------------------------------------------------------
-# HELPER FUNCTIONS
-# -----------------------------------------------------------------------------
-
-def get_ground_scale_m_per_pixel_from_fixed_alt() -> float:
+def get_ground_scale_m_per_pixel() -> float:
     fov_rad = math.radians(CAMERA_FOV_DEGREES)
     image_width_px = CAMERA_RESOLUTION[0]
     angle_per_pixel = fov_rad / image_width_px
-    metres_per_pixel = FIXED_ALTITUDE_M * angle_per_pixel
-    return metres_per_pixel
-
+    return FIXED_ALTITUDE_M * angle_per_pixel
 
 def compute_pixel_shift(img1_gray, img2_gray):
     orb = cv2.ORB_create()
-    keypoints1, descriptors1 = orb.detectAndCompute(img1_gray, None)
-    keypoints2, descriptors2 = orb.detectAndCompute(img2_gray, None)
-
-    if descriptors1 is None or descriptors2 is None:
+    kp1, desc1 = orb.detectAndCompute(img1_gray, None)
+    kp2, desc2 = orb.detectAndCompute(img2_gray, None)
+    
+    if desc1 is None or desc2 is None or len(desc1) < 10 or len(desc2) < 10:
         return None
-
+    
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(descriptors1, descriptors2)
-
+    matches = bf.match(desc1, desc2)
+    
     if len(matches) < 10:
         return None
-
-    matches = sorted(matches, key=lambda m: m.distance)
-
+    
+    matches = sorted(matches, key=lambda x: x.distance)
+    
     displacements = []
-    for m in matches:
-        pt1 = keypoints1[m.queryIdx].pt
-        pt2 = keypoints2[m.trainIdx].pt
-        dx = pt2[0] - pt1[0]
-        dy = pt2[1] - pt1[1]
-        dist = math.hypot(dx, dy)
+    for m in matches[:50]:  # Top 50 matches
+        pt1 = kp1[m.queryIdx].pt
+        pt2 = kp2[m.trainIdx].pt
+        dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
         displacements.append(dist)
-
-    if not displacements:
-        return None
-
+    
     return float(np.median(displacements))
 
-
-def median_with_outlier_rejection(values):
+def robust_median(values):
     if len(values) == 0:
         return None
-    if len(values) == 1:
-        return float(values[0])
-
-    arr = np.array(values, dtype=float)
+    arr = np.array(values)
     med = np.median(arr)
-    deviations = np.abs(arr - med)
-    med_dev = np.median(deviations)
-
-    if med_dev == 0:
+    devs = np.abs(arr - med)
+    mad = np.median(devs)
+    if mad == 0:
         return float(med)
-
-    mask = deviations <= 2.0 * med_dev
+    mask = devs <= 2 * mad
     filtered = arr[mask]
-
-    if len(filtered) == 0:
-        return float(med)
-
-    return float(np.median(filtered))
-
-
-# -----------------------------------------------------------------------------
-# MAIN EXPERIMENT
-# -----------------------------------------------------------------------------
+    return float(np.median(filtered)) if len(filtered) > 0 else float(med)
 
 def main():
-    sense = SenseHat()
     camera = None
+    sense = None
     
     try:
         camera = PiCamera()
         camera.resolution = CAMERA_RESOLUTION
         camera.framerate = 1
+        sense = SenseHat()
     except:
         pass
 
     start_time = time()
-    image_info_list = []
-
-    # Capture loop
-    for image_index in range(MAX_IMAGES_TARGET):
+    images = []
+    
+    # Capture images
+    for i in range(MAX_IMAGES_TARGET):
         now = time()
-        elapsed = now - start_time
-
-        if elapsed >= MAX_RUNTIME_SECONDS:
+        if now - start_time >= MAX_RUNTIME_SECONDS:
             break
-
+            
         success = False
-        filename = f"image_{image_index:02d}.jpg"
-        image_path = IMAGES_DIR / filename
-
-        if camera is not None:
+        filename = f"data/images/image_{i:02d}.jpg"
+        
+        if camera:
             try:
-                camera.capture(str(image_path))
+                camera.capture(filename)
                 success = True
             except:
                 pass
-
-        image_info_list.append({
-            "index": image_index,
-            "filename": filename,
-            "timestamp": now,
-            "success": success
-        })
-
+        
+        images.append({"timestamp": now, "filename": filename, "success": success})
         sleep(IMAGE_INTERVAL_SECONDS)
-
-    if camera is not None:
+    
+    if camera:
         try:
             camera.close()
         except:
             pass
 
-    # Process successful image pairs
-    speeds_km_per_s = []
-    metres_per_pixel = get_ground_scale_m_per_pixel_from_fixed_alt()
-
-    for i in range(len(image_info_list) - 1):
-        info1 = image_info_list[i]
-        info2 = image_info_list[i + 1]
-
-        if not (info1["success"] and info2["success"]):
+    # Process pairs
+    speeds = []
+    m_per_px = get_ground_scale_m_per_pixel()
+    
+    for i in range(len(images) - 1):
+        img1 = images[i]
+        img2 = images[i + 1]
+        
+        if not (img1["success"] and img2["success"]):
             continue
-
-        dt = info2["timestamp"] - info1["timestamp"]
+            
+        dt = img2["timestamp"] - img1["timestamp"]
         if dt <= 0:
             continue
-
-        img1_path = IMAGES_DIR / info1["filename"]
-        img2_path = IMAGES_DIR / info2["filename"]
-
+            
         try:
-            img1 = cv2.imread(str(img1_path))
-            img2 = cv2.imread(str(img2_path))
-            if img1 is None or img2 is None:
+            img1_cv = cv2.imread(img1["filename"])
+            img2_cv = cv2.imread(img2["filename"])
+            if img1_cv is None or img2_cv is None:
                 continue
-
-            img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-            img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
-            shift_pixels = compute_pixel_shift(img1_gray, img2_gray)
-            if shift_pixels is None:
+                
+            gray1 = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
+            
+            shift = compute_pixel_shift(gray1, gray2)
+            if shift is None:
                 continue
-
-            distance_m = shift_pixels * metres_per_pixel
-            speed_km_per_s = (distance_m / dt) / 1000.0
-            speeds_km_per_s.append(speed_km_per_s)
+                
+            distance_m = shift * m_per_px
+            speed_kms = (distance_m / dt) / 1000
+            speeds.append(speed_kms)
+            
         except:
             continue
 
-    # CRITICAL: Compute final speed with fallback
-    if len(speeds_km_per_s) > 0:
-        average_speed_km_per_s = median_with_outlier_rejection(speeds_km_per_s)
+    # Calculate final speed
+    if speeds:
+        final_speed = robust_median(speeds)
     else:
-        average_speed_km_per_s = 7.66  # Typical ISS speed
+        final_speed = 7.66  # Fallback ISS speed
 
-    # -----------------------------------------------------------------------------
-    # SAVE RESULTS - CORRECT FORMAT
-    # -----------------------------------------------------------------------------
-
-    # EXACTLY ONE NUMBER with ≤5 significant digits, NO extra text/newlines
-    speed_str = f"{average_speed_km_per_s:.5g}"
-    
-    # Write result.txt with PRECISE format: single number, single line, no trailing newline
-    with open("result.txt", "wb") as f:  # Binary write for precise control
-        f.write(speed_str.encode('ascii') + b'\n')
-
-    # Optional CSV (for your analysis only)
-    try:
-        with RESULTS_CSV.open("w", newline="") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(["image_index", "filename", "timestamp", "success"])
-            for info in image_info_list:
-                writer.writerow([
-                    info["index"],
-                    info["filename"],
-                    f"{info['timestamp']:.3f}",
-                    info["success"]
-                ])
-            writer.writerow([])
-            writer.writerow(["speed_km_per_s", speed_str, f"({len(speeds_km_per_s)} pairs)"])
-    except:
-        pass
+    # WRITE PERFECT result.txt
+    with open("result.txt", "w") as f:
+        f.write(f"{final_speed:.5g}\n")
 
     # Display
-    try:
-        sense.show_message(
-            f"{speed_str} km/s",
-            scroll_speed=0.05,
-            text_colour=[0, 255, 0]
-        )
-    except:
-        pass
-
+    if sense:
+        try:
+            sense.show_message(f"{final_speed:.2f} km/s", scroll_speed=0.05)
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
