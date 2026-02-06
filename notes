@@ -2,7 +2,7 @@ git pull
 
 
 git add .
-git commit -m "Describe what you changed"
+git commit -m "new changes"
 git push
 
 
