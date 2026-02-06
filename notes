@@ -4,3 +4,26 @@ git pull
 git add .
 git commit -m "Describe what you changed"
 git push
+
+
+
+
+
+
+"
+# Astro Pi Mission Space Lab – example experiment
+# Goal: Estimate the speed of the ISS by:
+#   1. Taking up to 42 images of Earth in at most 10 minutes.
+#   2. Recording the time and orbital data for each image.
+#   3. Using OpenCV to match features between consecutive images.
+#   4. Estimating ground distance from pixel shifts + altitude.
+#   5. Computing speed = distance / time and using a median
+#      to remove outliers ("Abweicher").
+#
+# NOTE:
+# - This is example code for you to study and adapt.
+# - You must check and adjust:
+#     * Camera resolution supported on Astro Pi hardware.
+#     * Field of view (FOV) of the camera used in calculations.
+#     * Any library imports allowed in this year's rules.
+"
